@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/send.ts": {
+      "runtime": "nodejs20.x",
+      "memory": 128,
+      "maxDuration": 10
+    }
+  }
+}
