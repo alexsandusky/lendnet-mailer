@@ -60,7 +60,10 @@ function buildLeadText(a: AnyObj, add: AnyObj) {
   const bizPhone = a.vat_number || a.phone || a.contact_profile?.phone || "";
   return [
     "Business Name: " + (a.business_name || add.business_name || ""),
-    "Full Name: " + [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name].filter(Boolean).join(" "),
+    "Full Name: " +
+      [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name]
+        .filter(Boolean)
+        .join(" "),
     "Email: " + (a.email || a.contact_profile?.email || ""),
     "Business Phone: " + bizPhone,
     "Mobile Phone: " + (a.phone || a.contact_profile?.phone || ""),
@@ -86,7 +89,10 @@ function buildPrequalText(a: AnyObj, add: AnyObj) {
   const bizPhone = a.vat_number || a.phone || a.contact_profile?.phone || "";
   return [
     "Business Name: " + (a.business_name || add.business_name || ""),
-    "Full Name: " + [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name].filter(Boolean).join(" "),
+    "Full Name: " +
+      [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name]
+        .filter(Boolean)
+        .join(" "),
     "Email: " + (a.email || a.contact_profile?.email || ""),
     "Business Phone: " + bizPhone,
     "Mobile Phone: " + (a.phone || a.contact_profile?.phone || ""),
@@ -125,10 +131,10 @@ function buildPrequalText(a: AnyObj, add: AnyObj) {
   ].join("\n");
 }
 
-/** -------- Helper: parse comma-separated recipients safely -------- */
-function parseToList(value: string) {
-  return value
-    .split(",")
+/** -------- Helper: parse comma/space separated recipients safely -------- */
+function splitList(v?: string): string[] {
+  return (v || "")
+    .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
 }
@@ -147,7 +153,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       req.query.test === "1" ||
       !!req.body?.test;
 
-    const kind = (req.body?.kind as string) || ""; // "lead" | "prequal"
+    const kind = (req.body?.kind as "lead" | "prequal") || "";
     if (kind !== "lead" && kind !== "prequal") {
       return res.status(400).json({ error: "Invalid kind" });
     }
@@ -162,32 +168,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? " New Pre-Underwriting Survey"
         : " New Business Loan Lead");
 
-    const text = (isPreQual || kind === "prequal")
-      ? buildPrequalText(a, add)
-      : buildLeadText(a, add);
+    const text =
+      isPreQual || kind === "prequal" ? buildPrequalText(a, add) : buildLeadText(a, add);
 
-    const from = env("MAIL_FROM", "Lendnet.io <sean@lendnet.io>");
+    // Sender + Reply-To (customizable)
+    const from = env("MAIL_FROM", "Lendnet.io <notify@lendnet.io>");
+    const replyTo = env("MAIL_REPLY_TO", "sean@lendnet.io");
+
+    // Recipients
     const to = TEST_MODE
-      ? parseToList(env("MAIL_TO_TEST", "sean@lendnet.io"))
-      : parseToList(env("MAIL_TO_LIVE", "info@lyftcapital.com,sean@lendnet.io"));
+      ? splitList(env("MAIL_TO_TEST", "sean@lendnet.io"))
+      : splitList(env("MAIL_TO_LIVE", "info@lyftcapital.com"));
 
-    const mail = { from, to, subject, text };
+    // CC only in live mode (defaults to you)
+    const cc = TEST_MODE ? [] : splitList(env("MAIL_CC_LIVE", "sean@lendnet.io"));
+
+    const mail = {
+      from,
+      to,
+      cc: cc.length ? cc : undefined,
+      replyTo,
+      subject,
+      text,
+    };
 
     if (DEBUG) {
       const peek = {
+        kind,
+        test: TEST_MODE,
+        from,
+        to,
+        cc,
+        replyTo,
         a_keys: Object.keys(a || {}),
         add_keys: Object.keys(add || {}),
-        sample: {
-          business_name: a?.business_name ?? add?.business_name,
-          email: a?.email ?? a?.contact_profile?.email,
-          phone: a?.phone ?? a?.contact_profile?.phone,
-          vat_number: a?.vat_number,
-          lead_amount: add?.answer_58915_xhsj3,
-          prequal_priority: add?.answer_88258_xhsj3,
-          utm_source: a?.utm_source ?? add?.utm_source,
-        },
-        to,
-        subject,
+        subjLen: subject.length,
+        textLen: text.length,
       };
       console.log("[VERCEL MAILER] IN:", JSON.stringify(peek));
     }
@@ -203,7 +219,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    return res.status(200).json({ ok: true, test: TEST_MODE, kind, messageId: info?.messageId });
+    return res
+      .status(200)
+      .json({ ok: true, test: TEST_MODE, kind, sent: { to, cc }, messageId: info?.messageId });
   } catch (e: any) {
     console.error("[VERCEL MAILER] ERROR:", e?.message || e);
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
