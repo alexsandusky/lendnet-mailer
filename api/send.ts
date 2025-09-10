@@ -1,14 +1,17 @@
+// /api/send.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import nodemailer from "nodemailer";
 
 function env(name: string, fallback?: string) {
   const v = process.env[name];
-  if (!v || v === "") {
+  if (v == null || v === "") {
     if (fallback !== undefined) return fallback;
     throw new Error(`Missing env ${name}`);
   }
   return v;
 }
+
+const DEBUG = (process.env.DEBUG_MAILER || "false") === "true";
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "mail.lendnet.io",
@@ -20,89 +23,114 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-type CFAttributes = Record<string, any>;
-
-function val(...c: any[]): string {
+type AnyObj = Record<string, any>;
+const val = (...c: any[]): string => {
   for (const x of c) if (x !== undefined && x !== null && String(x).trim() !== "") return String(x);
   return "";
+};
+
+/** -------- Normalize CF payload like the Worker does -------- */
+function normalize(body: AnyObj) {
+  // CF often posts { contact:{...}, event:{...} } and sometimes { attributes } / { payload }
+  const contact = body?.contact || {};
+  const event = body?.event || {};
+  const attrs = body?.attributes || body?.payload || {};
+  const profile = contact.contact_profile || event.contact_profile || attrs.contact_profile || {};
+
+  // Flatten to "a"
+  const a: AnyObj = { ...contact, ...event, ...attrs, contact_profile: profile };
+
+  // Where CF hides Q&A and UTMs the most
+  const add: AnyObj =
+    contact.additional_info ||
+    event.additional_info ||
+    attrs.additional_info ||
+    body?.additional_info ||
+    {};
+
+  // PreQual detector (same as Worker)
+  const addKeys = Object.keys(add || {});
+  const isPreQual = addKeys.some((k) => k.startsWith("answer_88258_"));
+
+  return { a, add, isPreQual };
 }
 
-// ---- email bodies (maps to your payloads) ----
-function renderLeadEmail(attrs: CFAttributes, info: any) {
-  const body = [
-    `Business Name: ${val(info?.business_name, attrs.business_name)}`,
-    `Full Name: ${val(attrs.first_name)} ${val(attrs.last_name)}`.trim(),
-    `Email: ${val(attrs.email)}`,
-    `Business Phone: ${val(attrs.phone)}`,
-    `Mobile Phone: `,
-    ``,
-    `Amount Needed: ${val(info?.answer_58915_xhsj3)}`,
-    `Monthly Sales: ${val(info?.answer_58915_pisOhMKbrq)}`,
-    `Time in Business: ${val(info?.answer_58915_nTAMvZ5Ii9)}`,
-    `Credit Range: ${val(info?.answer_58915_hzBZCKBRoP)}`,
-    `Industry: ${val(info?.answer_58915_Smg2rDp8Jy)}`,
-    ``,
-    `Tracking Parameters:`,
-    `FB Clid: ${val(attrs.fbclid, info?.fbclid)}`,
-    `Source: ${val(info?.utm_source)}`,
-    `Campaign: ${val(info?.utm_campaign)}`,
-    `Medium: ${val(info?.utm_medium)}`,
-    `Content: ${val(info?.utm_content)}`,
-    ``,
+/** -------- Email bodies (match Worker text exactly) -------- */
+function buildLeadText(a: AnyObj, add: AnyObj) {
+  const bizPhone = a.vat_number || a.phone || a.contact_profile?.phone || "";
+  return [
+    "Business Name: " + (a.business_name || add.business_name || ""),
+    "Full Name: " + [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name].filter(Boolean).join(" "),
+    "Email: " + (a.email || a.contact_profile?.email || ""),
+    "Business Phone: " + bizPhone,
+    "Mobile Phone: " + (a.phone || a.contact_profile?.phone || ""),
+    "",
+    "Amount Needed: " + (add.answer_58915_xhsj3 || ""),
+    "Monthly Sales: " + (add.answer_58915_pisOhMKbrq || ""),
+    "Time in Business: " + (add.answer_58915_nTAMvZ5Ii9 || ""),
+    "Credit Range: " + (add.answer_58915_hzBZCKBRoP || ""),
+    "Industry: " + (add.answer_58915_Smg2rDp8Jy || ""),
+    "",
+    "Tracking Parameters:",
+    "FB Clid: " + (a.fbclid || add.fbclid || ""),
+    "Source: " + (a.utm_source || add.utm_source || ""),
+    "Campaign: " + (a.utm_campaign || add.utm_campaign || ""),
+    "Medium: " + (a.utm_medium || add.utm_medium || ""),
+    "Content: " + (a.utm_content || add.utm_content || ""),
+    "",
   ].join("\n");
-
-  return {
-    subject: `${env("MAIL_SUBJ_PREFIX", "[Lendnet.io]")} New Business Loan Lead`,
-    text: body,
-  };
 }
 
-function renderPrequalEmail(attrs: CFAttributes, info: any) {
-  const r = (k: string) => val(info?.[k]);
-  const body = [
-    `Business Name: ${val(info?.business_name, attrs.business_name)}`,
-    `Full Name: ${val(attrs.first_name)} ${val(attrs.last_name)}`.trim(),
-    `Email: ${val(attrs.email)}`,
-    `Business Phone: ${val(attrs.phone)}`,
-    `Mobile Phone: `,
-    ``,
-    `Pre-Underwriting Survey Answers:`,
-    `Priority: ${r("answer_88258_xhsj3")}`,
-    `Timeline: ${r("answer_88258_yzA90Xu4rN")}`,
-    `Franchise: ${r("answer_88258_vsx7u8gmdl")}`,
-    `Use of funds: ${r("answer_88258_bSQne6Mvu8")}`,
-    `Profitable: ${r("answer_88258_S2aVdEDKfJ")}`,
-    `Tax liens: ${r("answer_88258_wrDsTWxWz8")}`,
-    `Bankruptcy: ${r("answer_88258_9CmdGjdF79")}`,
-    `BK Status: ${r("answer_88258_hcvrXeUCVm")}`,
-    `BK Discharged: ${r("answer_88258_FOa4FSnEam")}`,
-    `Bank accts: ${r("answer_88258_xSJXMVN7qd")}`,
-    `Entity: ${r("answer_88258_NdkMRm9tFE")}`,
-    `Deposits/month: ${r("answer_88258_iR4iPvp9Kz")}`,
-    `NSFs/month: ${r("answer_88258_f0mbFNkDDb")}`,
-    `Min daily balance: ${r("answer_88258_iNAeKr99AI")}`,
-    `Negative days: ${r("answer_88258_X6GIZa4LkX")}`,
-    `Paying off debt: ${r("answer_88258_qmcAEgk0TN")}`,
-    `Debt type: ${r("answer_88258_kmluskg5mI")}`,
-    `Loans count: ${r("answer_88258_sja81P51mR")}`,
-    `Ever defaulted: ${r("answer_88258_f5C2TCIXZP")}`,
-    `Ownership: ${r("answer_88258_Aee8ztqutG")}`,
-    `Property: ${r("answer_88258_ALcdqdVpxa")}`,
-    `Employees: ${r("answer_88258_RLanLJWhyI")}`,
-    ``,
-    `Tracking Parameters:`,
-    `FB Clid: ${val(attrs.fbclid, info?.fbclid)}`,
-    `Source: ${val(info?.utm_source)}`,
-    `Campaign: ${val(info?.utm_campaign)}`,
-    `Medium: ${val(info?.utm_medium)}`,
-    `Content: ${val(info?.utm_content)}`,
-    ``,
+function buildPrequalText(a: AnyObj, add: AnyObj) {
+  const L = (label: string, v: any) => `${label}: ${v || ""}`;
+  const bizPhone = a.vat_number || a.phone || a.contact_profile?.phone || "";
+  return [
+    "Business Name: " + (a.business_name || add.business_name || ""),
+    "Full Name: " + [a.first_name || a.contact_profile?.first_name, a.last_name || a.contact_profile?.last_name].filter(Boolean).join(" "),
+    "Email: " + (a.email || a.contact_profile?.email || ""),
+    "Business Phone: " + bizPhone,
+    "Mobile Phone: " + (a.phone || a.contact_profile?.phone || ""),
+    "",
+    "Pre-Underwriting Survey Answers:",
+    L("Priority", add.answer_88258_xhsj3),
+    L("Timeline", add.answer_88258_yzA90Xu4rN),
+    L("Franchise", add.answer_88258_vsx7u8gmdl),
+    L("Use of funds", add.answer_88258_bSQne6Mvu8),
+    L("Profitable", add.answer_88258_S2aVdEDKfJ),
+    L("Tax liens", add.answer_88258_wrDsTWxWz8),
+    L("Bankruptcy", add.answer_88258_9CmdGjdF79),
+    L("BK Status", add.answer_88258_hcvrXeUCVm),
+    L("BK Discharged", add.answer_88258_FOa4FSnEam),
+    L("Bank accts", add.answer_88258_xSJXMVN7qd),
+    L("Entity", add.answer_88258_NdkMRm9tFE),
+    L("Deposits/month", add.answer_88258_iR4iPvp9Kz),
+    L("NSFs/month", add.answer_88258_f0mbFNkDDb),
+    L("Min daily balance", add.answer_88258_iNAeKr99AI),
+    L("Negative days", add.answer_88258_X6GIZa4LkX),
+    L("Paying off debt", add.answer_88258_qmcAEgk0TN),
+    L("Debt type", add.answer_88258_kmluskg5mI),
+    L("Loans count", add.answer_88258_sja81P51mR),
+    L("Ever defaulted", add.answer_88258_f5C2TCIXZP),
+    L("Ownership", add.answer_88258_Aee8ztqutG),
+    L("Property", add.answer_88258_ALcdqdVpxa),
+    L("Employees", add.answer_88258_RLanLJWhyI),
+    "",
+    "Tracking Parameters:",
+    L("FB Clid", a.fbclid || add.fbclid),
+    L("Source", a.utm_source || add.utm_source),
+    L("Campaign", a.utm_campaign || add.utm_campaign),
+    L("Medium", a.utm_medium || add.utm_medium),
+    L("Content", a.utm_content || add.utm_content),
+    "",
   ].join("\n");
+}
 
-  return {
-    subject: `${env("MAIL_SUBJ_PREFIX", "[Lendnet.io]")} New Pre-Underwriting Survey`,
-    text: body,
-  };
+/** -------- Helper: parse comma-separated recipients safely -------- */
+function parseToList(value: string) {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -119,30 +147,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       req.query.test === "1" ||
       !!req.body?.test;
 
-    const kind = req.body?.kind as "lead" | "prequal";
+    const kind = (req.body?.kind as string) || ""; // "lead" | "prequal"
     if (kind !== "lead" && kind !== "prequal") {
       return res.status(400).json({ error: "Invalid kind" });
     }
 
-    const attrs = (req.body?.attributes ?? {}) as CFAttributes;
-    const info = (req.body?.additional_info ?? {}) as Record<string, any>;
+    // Normalize body into a + add (matches Worker)
+    const { a, add, isPreQual } = normalize(req.body || {});
 
-    const { subject, text } =
-      kind === "lead" ? renderLeadEmail(attrs, info) : renderPrequalEmail(attrs, info);
+    // Build subject/text like Worker
+    const subject =
+      (process.env.MAIL_SUBJ_PREFIX || "[Lendnet.io]") +
+      (isPreQual || kind === "prequal"
+        ? " New Pre-Underwriting Survey"
+        : " New Business Loan Lead");
 
-    const mail = {
-      from: env("MAIL_FROM", "Lendnet.io <sean@lendnet.io>"),
-      to: TEST_MODE
-        ? env("MAIL_TO_TEST", "sean@lendnet.io")
-        : env("MAIL_TO_LIVE", "info@lyftcapital.com,sean@lendnet.io"),
-      subject,
-      text,
-    };
+    const text = (isPreQual || kind === "prequal")
+      ? buildPrequalText(a, add)
+      : buildLeadText(a, add);
 
-    await transporter.sendMail(mail);
-    return res.status(200).json({ ok: true, test: TEST_MODE });
+    const from = env("MAIL_FROM", "Lendnet.io <sean@lendnet.io>");
+    const to = TEST_MODE
+      ? parseToList(env("MAIL_TO_TEST", "sean@lendnet.io"))
+      : parseToList(env("MAIL_TO_LIVE", "info@lyftcapital.com,sean@lendnet.io"));
+
+    const mail = { from, to, subject, text };
+
+    if (DEBUG) {
+      const peek = {
+        a_keys: Object.keys(a || {}),
+        add_keys: Object.keys(add || {}),
+        sample: {
+          business_name: a?.business_name ?? add?.business_name,
+          email: a?.email ?? a?.contact_profile?.email,
+          phone: a?.phone ?? a?.contact_profile?.phone,
+          vat_number: a?.vat_number,
+          lead_amount: add?.answer_58915_xhsj3,
+          prequal_priority: add?.answer_88258_xhsj3,
+          utm_source: a?.utm_source ?? add?.utm_source,
+        },
+        to,
+        subject,
+      };
+      console.log("[VERCEL MAILER] IN:", JSON.stringify(peek));
+    }
+
+    const info = await transporter.sendMail(mail);
+
+    if (DEBUG) {
+      console.log("[VERCEL MAILER] SENT:", {
+        messageId: info?.messageId,
+        accepted: info?.accepted,
+        rejected: info?.rejected,
+        response: info?.response,
+      });
+    }
+
+    return res.status(200).json({ ok: true, test: TEST_MODE, kind, messageId: info?.messageId });
   } catch (e: any) {
-    console.error("Mailer error:", e?.message || e);
-    return res.status(500).json({ error: "Internal error" });
+    console.error("[VERCEL MAILER] ERROR:", e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }
